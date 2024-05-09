@@ -1,0 +1,108 @@
+#boxes
+# Definición de la referencia al box de Ubuntu 18.04
+Ubu = 'ubuntu/bionic64'
+# Deb = 'debian/buster64'
+#
+# @ IP Master = 192.168.1.W9
+# @ IP worker w1 = 192.168.1.W1
+# ... etc
+# Valor ejemplo atribuido a alumnos al principio de asignatura, W = E (14)
+
+MASTER = '192.168.1.149'
+# Lista de nodos trabajadores y master con su respectiva información y direcciones Ips
+#ademas de la memoria que se le asigna a cada uno y ademas de definirles la ip de su master
+NODES = [
+  { hostname: 'm', type: "master", ip: MASTER, mem: 1800, m: MASTER },
+  { hostname: 'w1', type: "worker", ip: '192.168.1.141', mem: 1800, m: MASTER },
+  { hostname: 'w2', type: "worker", ip: '192.168.1.142', mem: 1800, m: MASTER },
+  { hostname: 'w3', type: "worker", ip: '192.168.1.143', mem: 1800, m: MASTER },
+]
+# Configuración de Vagrant
+Vagrant.configure("2") do |config| #Crea una instancia de configuración de Vagrant
+    NODES.each do |node| # Itera sobre la lista de nodos
+        config.vm.define node[:hostname] do |nodeconfig| # Definición de la configuración de la máquina
+            nodeconfig.vm.box = Ubu # Asignación de la imagen a utilizar
+            nodeconfig.vm.hostname = node[:hostname] # Asignación del nombre de la máquina
+            
+            # Config red 
+            # Tipo de red en este caso pública, para que desde la red del host sea visible usando el
+            # interfaz br1 de la maquina host
+            nodeconfig.vm.network :public_network, 
+                    bridge: "br1", # Nombre de la interfaz de red
+                    ip: node[:ip], # Dirección IP
+                    # virtualbox__intnet: true,
+                    nic_type: "virtio", #Tipo de interfaz de red virtual
+                    :dev => "br1"
+		    #:mode => "bridge",
+		    #:type => "bridge"
+# Configuración de recursos de la máquina virtual
+            config.vm.provider :libvirt do |lib|
+                lib.uri = "qemu+ssh://a841972@155.210.154.201/system"
+                lib.username = "a841972"    
+                lib.memory = node[:mem]
+                lib.nic_model_type = "virtio"
+                lib.driver = "kvm"
+                lib.cpus = 1
+                lib.keymap = 'es'
+                lib.storage_pool_name = "a841972remote"
+            end
+            #nodeconfig.vm.synced_folder ".", "/vagrant", type: "rsync"
+            if node[:type] == "worker"
+                nodeconfig.vm.customize [ "createmedium",
+                    "--filename", "disk-#{node[:hostname]}.vdi",
+                    "--size", 30*1024 ] # Que tamaño es este ??
+                nodeconfig.vm.customize [ "storageattach", :id,
+                    "--storagectl", "SCSI",
+                    "--port", 2, "--device", 0,"--type", "hdd",
+                    "--medium", "disk-#{node[:hostname]}.vdi" ]
+            end
+
+            #Este fragmento de código si no estuviera comentado
+            # se encargaría de mirar cada nodo worker  y comprobar si exite el fichero de disco
+            # y si no crearía un controlador SATA para cada nodo y posteriormente un disco virtual de 20GB
+
+=begin
+            if node[:type] == "worker"
+                nm = node[:hostname]
+                unless File.exist?("disk-#{nm}.vdi")
+                    v.customize ["storagectl", :id,"--name", "VboxSata",
+                                                            "--add", "sata"]
+                end
+                unless File.exist?("disk-#{nm}.vdi")
+                    v.customize [ "createmedium", "--filename",
+                        "disk-#{nm}.vdi","--size", 20*1024 ]
+                end
+            end
+=end
+            #Ahora se bootea la maquina recien creada       
+            nodeconfig.vm.boot_timeout = 400
+            # A continuación es el aprovisionamiento, se establece que se usara un script de shell llamado 
+            # provision.sh y se le pasan los argumentos necesarios :(nombre de la máquina, dirección IP,
+            # su master y tipo si es master o worker)
+            nodeconfig.vm.provision "shell", 
+                path: 'puppet.sh'
+            nodeconfig.vm.provision "puppet" do |puppet|
+                puppet.options = "--verbose"
+                puppet.facter = {
+                    "hostname" => node[:hostname],
+                    "ip" => node[:ip],
+                    "m" => node[:m],
+                    "type" => node[:type]
+                }
+                puppet.manifests_path = "manifests/"
+                puppet.manifest_file = "provision.pp"
+            end
+            #args: [ node[:hostname], node[:ip], node[:m], node[:type] ]
+            #Finalmente tras realizar el aprovisionamineto se define un trigger 
+            #que se ejecutará después de que la máquina termine de arrancar, entonces se copia el fichero k3s.yaml
+            #en el directorio /home/morenopablo16/.kube/config
+            # No hace caso al if ?
+            if node[:type] == "master"
+              nodeconfig.trigger.after :up do |trigger|
+                trigger.run = \
+                        {inline: "sh -c 'cp k3s.yaml /home/morenopablo16/.kube/config'"}
+              end
+            end
+        end
+    end
+end
